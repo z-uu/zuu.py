@@ -23,6 +23,7 @@ class Scoop:
         result = subprocess.run(
             ["scoop", "list"], capture_output=True, text=True, check=True, shell=True
         )
+        has_started = False 
         for line in result.stdout.splitlines():
             if "----" in line:
                 has_started = True
