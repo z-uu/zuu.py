@@ -1,6 +1,7 @@
 from typing import Any, Callable, Optional, Dict
-from zuu.util_file import load, save
+from zuu.util_file import load, save, touch
 import os
+import json
 
 
 class fileProperty:
@@ -30,11 +31,8 @@ class fileProperty:
         self.name = None
         self._cache = {}
         self._resolved_path = None
-
-        if change_detector is None:
-            self.change_detector = self._default_change_detector
-        else:
-            self.change_detector = change_detector
+        self.change_detector = change_detector or self._default_change_detector
+        self._callbacks = []
 
     def _get_cache_key(self, path: str) -> str:
         """Generate a unique cache key for a path and property"""
@@ -48,104 +46,90 @@ class fileProperty:
 
         cache_key = f"mtime:{path}"
         current_mtime = os.path.getmtime(path)
-
-        if cache_key not in cache:
+        
+        if cache_key not in cache or current_mtime > cache[cache_key]:
             cache[cache_key] = current_mtime
-            return False
-
-        changed = current_mtime > cache[cache_key]
-        cache[cache_key] = current_mtime
-        return changed
+            return True
+        return False
 
     def __set_name__(self, owner, name):
         self.name = name
+        self.owner = owner  # Store the owner class
 
     def _resolve_path(self, obj) -> str:
-        """Resolve the path from either string, callable or instance attribute"""
-        if self._resolved_path is not None:
-            return self._resolved_path
-
-        if self._path is None:
-            # Try to get path from instance
-            if hasattr(obj, "path"):
-                self._resolved_path = obj.path
-            else:
-                raise AttributeError(
-                    "No path specified and instance has no 'path' attribute"
-                )
-        elif callable(self._path):
-            self._resolved_path = self._path(obj)
+        """Resolve the path from various sources"""
+        if obj is None:
+            # Class-level access, use the owner class
+            resolving_obj = self.owner
         else:
-            self._resolved_path = self._path
+            resolving_obj = obj
 
+        if self._resolved_path is None:
+            if self._path is None:
+                if hasattr(resolving_obj, "path"):
+                    self._resolved_path = resolving_obj.path
+                else:
+                    raise AttributeError("Missing path specification")
+            else:
+                self._resolved_path = self._path(resolving_obj) if callable(self._path) else self._path
         return self._resolved_path
 
     def __get__(self, obj, objtype=None) -> Any:
+        # Handle class-level access
         if obj is None:
-            return self
-
+            obj = self.owner  # Use the class itself as the storage object
+        
         path = self._resolve_path(obj)
-
-        if not path:
-            raise ValueError("Path not properly set")
-
-        # Convert path to string if it's a Path object
         path_str = str(path) if hasattr(path, "__fspath__") else path
-
-        if self.change_detector(path_str, self._cache):
-            # File changed externally, reload
-            try:
-                value = load(path_str)
-            except Exception:
-                value = None
-            if value is not None:
-                obj.__dict__[self.name] = value
-                return value
-
-        # Return cached value if exists
+        
+        # Check if we need to refresh the data
         if self.name in obj.__dict__:
-            return obj.__dict__[self.name]
+            if self.change_detector(path_str, self._cache):
+                self._load_and_store(obj, path_str)
+        else:
+            self._load_and_store(obj, path_str)
+            
+        return obj.__dict__[self.name]
 
-        # Initial load
+    def _load_and_store(self, obj, path_str):
+        """Load data from file and store in instance dict"""
         try:
-            value = load(path_str)
-        except Exception:
-            value = None
-        if value is not None:
-            obj.__dict__[self.name] = value
-        return value
+            # Use touch to ensure file exists with proper structure
+            touch(path_str, initial_factory=lambda: {})
+            
+            # Load normally after ensuring file exists
+            obj.__dict__[self.name] = load(path_str)
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            # Handle edge cases where file creation raced with other processes
+            obj.__dict__[self.name] = {}
+            save({}, path_str)
+        except Exception as e:
+            raise AttributeError(
+                f"Failed to load data from {path_str}. Error: {str(e)}"
+            ) from e
 
     def __set__(self, obj, value):
+        # Handle class-level assignment through metaclass
+        if obj is None:
+            # Class-level assignment not supported directly
+            raise AttributeError("Cannot set class-level fileProperty directly")
+        
+        # Rest of existing __set__ implementation
         path = self._resolve_path(obj)
+        path_str = str(path) if hasattr(path, "__fspath__") else path
+        
+        # Store value and save to file
         obj.__dict__[self.name] = value
-
+        
         if self.auto_sync:
-            # Convert path to string if it's a Path object
-            path_str = str(path) if hasattr(path, "__fspath__") else path
-
-            # Only create directories if there's actually a directory path
-            dirname = os.path.dirname(path_str)
-            if dirname:  # Only create directories if there's a non-empty directory path
-                os.makedirs(dirname, exist_ok=True)
-
+            os.makedirs(os.path.dirname(path_str), exist_ok=True)
             save(value, path_str)
-            # Update cache after saving
-            cache_key = f"mtime:{path_str}"
-            self._cache[cache_key] = os.path.getmtime(path_str)
-
-            # Call callback if defined
-            if hasattr(self, "_callback"):
-                self._callback(obj, value)
+            self._cache[f"mtime:{path_str}"] = os.path.getmtime(path_str)
+            
+            for callback in self._callbacks:
+                callback(obj, value)
 
     def callback(self, func):
-        """
-        Decorator to set a callback function that will be called after the property is set.
-        The callback receives the instance and the new value as arguments.
-
-        Example:
-            @property.callback
-            def on_change(self, new_value):
-                print(f"Value changed to: {new_value}")
-        """
-        self._callback = func
+        """Register multiple callbacks to be called when the value changes"""
+        self._callbacks.append(func)
         return self

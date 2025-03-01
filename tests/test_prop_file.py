@@ -99,3 +99,149 @@ def test_missing_path():
     obj = TestObj()
     with pytest.raises(AttributeError):
         obj.prop = {"test": "error"} 
+
+def test_local_updates(tmp_path):
+    """Test multiple local updates and synchronization"""
+    test_file = tmp_path / "tests" / "local_updates.json"
+    
+    class TestObj:
+        prop = fileProperty(test_file)
+        
+        @prop.callback
+        def on_prop_change(self, value):
+            self.callback_count = getattr(self, 'callback_count', 0) + 1
+
+    obj = TestObj()
+    
+    # Initial set
+    obj.prop = {"version": 1}
+    assert obj.prop == {"version": 1}
+    assert obj.callback_count == 1
+    
+    # Update with new value
+    obj.prop = {"version": 2, "data": "test"}
+    assert obj.prop["version"] == 2
+    assert obj.callback_count == 2
+    
+    # Verify file content
+    with open(test_file) as f:
+        assert f.read() == '{"version": 2, "data": "test"}'
+
+def test_concurrent_modifications(tmp_path):
+    """Test local changes overriding external changes"""
+    test_file = tmp_path / "tests" / "concurrent.json"
+    
+    class TestObj:
+        prop = fileProperty(test_file)
+    
+    obj = TestObj()
+    obj.prop = {"value": "initial"}
+    
+    # Make external change
+    with open(test_file, 'w') as f:
+        f.write('{"value": "external"}')
+    
+    # Make local change that should override
+    obj.prop = {"value": "local"}
+    
+    # Verify local change persists
+    assert obj.prop == {"value": "local"}
+    with open(test_file) as f:
+        assert f.read() == '{"value": "local"}'
+
+def test_class_property(tmp_path):
+    """Test using fileProperty as a class-level property"""
+    test_file = tmp_path / "class_prop.json"
+    
+    class ClassConfig:
+        # Singleton instance
+        _instance = None
+        
+        def __new__(cls):
+            if not cls._instance:
+                cls._instance = super().__new__(cls)
+            return cls._instance
+        
+        DATA = fileProperty(test_file)
+        
+        @DATA.callback
+        def on_change(self, value):
+            self.last_value = value
+
+    # Test through singleton instance
+    config = ClassConfig()
+    config.DATA = {"version": 1}
+    assert config.DATA == {"version": 1}
+    assert os.path.exists(test_file)
+    
+    # Verify file content
+    with open(test_file) as f:
+        assert '{"version": 1}' in f.read()
+    
+    # Test modification
+    config.DATA["updated"] = True
+    config.DATA = config.DATA  # Trigger save
+    assert config.DATA == {"version": 1, "updated": True}
+    
+    # Test callback
+    assert hasattr(config, 'last_value')
+    assert config.last_value == {"version": 1, "updated": True}
+    
+    # Test external changes
+    with open(test_file, 'w') as f:
+        f.write('{"external": "modification"}')
+    
+    # Should detect change on next access
+    assert config.DATA == {"external": "modification"}
+
+def test_class_instance_independence(tmp_path):
+    """Test class property doesn't interfere with instance property"""
+    class FileUser:
+        CLASS_DATA = fileProperty(tmp_path / "class_data.json")
+        
+        def __init__(self):
+            self.INSTANCE_DATA = fileProperty(tmp_path / "instance_data.json")
+
+    # Set class property
+    FileUser.CLASS_DATA = {"class": "value"}
+    
+    # Create instances
+    user1 = FileUser()
+    user2 = FileUser()
+    
+    # Set instance properties
+    user1.INSTANCE_DATA = {"user1": "data"}
+    user2.INSTANCE_DATA = {"user2": "data"}
+    
+    # Verify independence
+    assert FileUser.CLASS_DATA == {"class": "value"}
+    assert user1.INSTANCE_DATA == {"user1": "data"}
+    assert user2.INSTANCE_DATA == {"user2": "data"}
+    
+    # Verify files exist
+    assert os.path.exists(tmp_path / "class_data.json")
+    assert os.path.exists(tmp_path / "instance_data.json")
+
+def test_dynamic_class_path(tmp_path):
+    """Test class property with dynamic path resolution"""
+    class DynamicClass:
+        _path = tmp_path / "dynamic.json"
+        
+        @classmethod
+        def get_path(cls):
+            return cls._path
+        
+        DATA = fileProperty(get_path)
+
+    # Initial set
+    DynamicClass.DATA = {"status": "active"}
+    assert os.path.exists(DynamicClass._path)
+    
+    # Modify path
+    new_path = tmp_path / "new_dynamic.json"
+    DynamicClass._path = new_path
+    
+    # Should create new file
+    DynamicClass.DATA = {"status": "moved"}
+    assert os.path.exists(new_path)
+    assert not os.path.exists(tmp_path / "dynamic.json")
