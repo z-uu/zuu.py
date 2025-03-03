@@ -152,7 +152,7 @@ class ScoopPkg:
 
     @cached_property
     def path(self):
-        path = os.path.join(ScoopSelf.path(), "apps", self.name, "current")
+        path = os.path.join(ScoopSelf.path(), self.name, "current")
         if not os.path.exists(path):
             raise FileNotFoundError(f"Application path not found: {path}")
         return path
