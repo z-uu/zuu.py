@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from functools import cache
+from functools import cache, cached_property
 import subprocess
 import json
 import os
@@ -140,8 +140,7 @@ class ScoopPkg:
         except json.JSONDecodeError:
             return None
 
-    @property
-    @cache
+    @cached_property
     def manifestData(self):
         return self.cat()
 
@@ -151,10 +150,14 @@ class ScoopPkg:
             ScoopSelf.path(), "buckets", self.bucket, "bucket", f"{self.name}.json"
         )
 
-    @property
-    @cache
+    @cached_property
     def path(self):
         path = os.path.join(ScoopSelf.path(), "apps", self.name, "current")
         if not os.path.exists(path):
             raise FileNotFoundError(f"Application path not found: {path}")
         return path
+
+    def _clearCache(self):
+        self.__dict__.pop("manifestData", None)
+        self.__dict__.pop("path", None)
+
